@@ -88,7 +88,7 @@ export async function multipartUpload(key, file, options) {
   const etag = res.headers.etag;
   console.log(`[R2] ✅ part ${i} done   etag=${etag}`);
   console.log(res.data);
-  console.log(res.header);
+  console.log(res.headers);
   return {
     partNumber: i,
     etag: res.headers.etag,          // 여기서 undefined 면 바로 알 수 있음
