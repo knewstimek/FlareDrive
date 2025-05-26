@@ -52,7 +52,7 @@ export async function blobDigest(blob) {
   return digestHex;
 }
 
-export const SIZE_LIMIT = 100 * 1000 * 1000; // 100MB
+export const SIZE_LIMIT = 95 * 1000 * 1000; // 100MB
 
 /**
  * @param {string} key
