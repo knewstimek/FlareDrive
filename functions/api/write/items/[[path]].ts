@@ -83,6 +83,7 @@ export async function onRequestPutMultipart(context) {
     headers: {
       "Content-Type": "application/json",
       etag: uploadedPart.etag,
+      "Access-Control-Expose-Headers": "ETag",
     },
   });
 }
