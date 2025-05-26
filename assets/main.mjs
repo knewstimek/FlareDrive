@@ -71,7 +71,7 @@ export async function multipartUpload(key, file, options) {
   const promiseGenerator = function* () {
     for (let i = 1; i <= totalChunks; i++) {
       const chunk = file.slice((i - 1) * SIZE_LIMIT, i * SIZE_LIMIT);
-      const searchParams = new URLSearchParams({ PartNumber: i, uploadId });
+      const searchParams = new URLSearchParams({ partNumber: i, uploadId });
       yield axios
         .put(`/api/write/items/${key}?${searchParams}`, chunk, {
           onUploadProgress(progressEvent) {
