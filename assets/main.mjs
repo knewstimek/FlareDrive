@@ -92,7 +92,7 @@ export async function multipartUpload(key, file, options) {
   const uploadedParts = [];
   for (const part of promiseGenerator()) {
     const { PartNumber, ETag } = await part;
-    uploadedParts[PartNumber - 1] = { PartNumber, ETag };
+    uploadedParts[PartNumber - 1] = { partNumber: PartNumber, (ETag || "").replace(/"/g, "") };
   }
   const completeParams = new URLSearchParams({ uploadId });
   await axios.post(`/api/write/items/${key}?${completeParams}`, {
