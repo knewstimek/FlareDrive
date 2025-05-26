@@ -89,7 +89,7 @@ export async function multipartUpload(key, file, options) {
   console.log(`[R2] ✅ part ${i} done   etag=${etag}`);
   return {
     partNumber: i,
-    etag: res.headers.etag,          // 여기서 undefined 면 바로 알 수 있음
+    etag: res.data.etag,          // 여기서 undefined 면 바로 알 수 있음
   };
 });
     }
