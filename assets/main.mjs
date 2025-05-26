@@ -84,14 +84,14 @@ export async function multipartUpload(key, file, options) {
           },
         })
 .then((res) => {
-  console.log(`[R2] ✅ part ${i} done`, res.data);   // ← 추가
-  const etag = res.data.etag;
+  console.log(`[R2] ✅ part ${i} done`, res.headers);   // ← 추가
+  const etag = res.headers.etag;
   console.log(`[R2] ✅ part ${i} done   etag=${etag}`);
   console.log(res.data);
   console.log(res.header);
   return {
     partNumber: i,
-    etag: res.data.etag,          // 여기서 undefined 면 바로 알 수 있음
+    etag: res.headers.etag,          // 여기서 undefined 면 바로 알 수 있음
   };
 });
     }
