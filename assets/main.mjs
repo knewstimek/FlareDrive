@@ -95,7 +95,7 @@ export async function multipartUpload(key, file, options) {
     uploadedParts[partNumber - 1] = { partNumber, etag };
   }
   console.log("[R2] Complete payload:", uploadedParts);
-  const completeParams = new URLSearchParams({ uploadId });
+
   await axios.post(`/api/write/items/${key}?${completeParams}`, {
     parts: uploadedParts,
   });
