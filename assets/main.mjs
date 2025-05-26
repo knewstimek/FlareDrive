@@ -72,6 +72,9 @@ export async function multipartUpload(key, file, options) {
     for (let i = 1; i <= totalChunks; i++) {
       const chunk = file.slice((i - 1) * SIZE_LIMIT, i * SIZE_LIMIT);
       const searchParams = new URLSearchParams({ partNumber: i, uploadId });
+
+  console.log(`[R2] PUT part ${i}/${totalChunks}  size=${chunk.size}`);
+      
       yield axios
         .put(`/api/write/items/${key}?${searchParams}`, chunk, {
           onUploadProgress(progressEvent) {
@@ -83,19 +86,23 @@ export async function multipartUpload(key, file, options) {
           },
         })
         .then((res) => ({
-          PartNumber: i,
-          ETag:       res.headers.etag,
+          partNumber: i,
+          etag:       res.headers.etag,
         }));
     }
   };
 
   const uploadedParts = [];
   for (const part of promiseGenerator()) {
-    const { PartNumber, ETag } = await part;
-    uploadedParts[PartNumber - 1] = { PartNumber, Etag: (ETag || "").replace(/"/g, "") };
+    const { partNumber, etag } = await part;
+    uploadedParts[partNumber - 1] = { partNumber, etag: etag.replace(/"/g, "") };
   }
   const completeParams = new URLSearchParams({ uploadId });
-  await axios.post(`/api/write/items/${key}?${completeParams}`, {
-    parts: uploadedParts,
-  });
+  axios
+    .post(`/api/write/items/${key}?${completeParams}`, { parts: uploadedParts })
+    .then(() => console.log("[R2] 🎉 upload complete"))
+    .catch((err) => {
+      console.error("[R2] ❌ complete failed", err.response?.data || err);
+      throw err;
+    });
 }
