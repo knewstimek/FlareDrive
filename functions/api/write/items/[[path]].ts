@@ -78,11 +78,13 @@ export async function onRequestPutMultipart(context) {
     partNumber,
     request.body
   );
+  const payload = { partNumber, etag: uploadedPart.etag };
 
-  return new Response(null, {
+  return new Response(JSON.stringify(payload), {
     headers: {
       "Content-Type": "application/json",
-      etag: uploadedPart.etag,
+      "ETag": uploadedPart.etag,
+      "Access-Control-Allow-Origin": "*",
       "Access-Control-Expose-Headers": "ETag",
     },
   });
