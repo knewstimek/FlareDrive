@@ -52,7 +52,7 @@ export async function blobDigest(blob) {
   return digestHex;
 }
 
-export const SIZE_LIMIT = 95 * 1000 * 1000; // 100MB
+export const SIZE_LIMIT = 100 * 1000 * 1000; // 100MB
 
 /**
  * @param {string} key
@@ -72,9 +72,6 @@ export async function multipartUpload(key, file, options) {
     for (let i = 1; i <= totalChunks; i++) {
       const chunk = file.slice((i - 1) * SIZE_LIMIT, i * SIZE_LIMIT);
       const searchParams = new URLSearchParams({ partNumber: i, uploadId });
-
-  console.log(`[R2] PUT part ${i}/${totalChunks}  size=${chunk.size}`);
-      
       yield axios
         .put(`/api/write/items/${key}?${searchParams}`, chunk, {
           onUploadProgress(progressEvent) {
@@ -87,7 +84,7 @@ export async function multipartUpload(key, file, options) {
         })
         .then((res) => ({
           partNumber: i,
-          etag:       res.headers.etag,
+          etag: res.headers.etag,
         }));
     }
   };
@@ -95,7 +92,7 @@ export async function multipartUpload(key, file, options) {
   const uploadedParts = [];
   for (const part of promiseGenerator()) {
     const { partNumber, etag } = await part;
-    uploadedParts[partNumber - 1] = { partNumber, etag: etag.replace(/"/g, "") };
+    uploadedParts[partNumber - 1] = { partNumber, etag };
   }
   const completeParams = new URLSearchParams({ uploadId });
   axios
