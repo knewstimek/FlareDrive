@@ -84,8 +84,8 @@ export async function multipartUpload(key, file, options) {
           },
         })
 .then((res) => {
-  console.log(`[R2] ✅ part ${i} done`, res.headers);   // ← 추가
-  const etag = res.headers.etag;
+  console.log(`[R2] ✅ part ${i} done`, res.data);   // ← 추가
+  const etag = res.data.etag;
   console.log(`[R2] ✅ part ${i} done   etag=${etag}`);
   return {
     partNumber: i,
