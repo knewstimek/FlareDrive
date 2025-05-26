@@ -84,7 +84,7 @@ export async function multipartUpload(key, file, options) {
         })
         .then((res) => ({
           PartNumber: i,
-          ETag: res.headers.etag,
+          ETag:       res.headers.etag.replace(/^"|"$/g, ""),
         }));
     }
   };
