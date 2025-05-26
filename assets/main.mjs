@@ -53,7 +53,6 @@ export async function blobDigest(blob) {
 }
 
 export const SIZE_LIMIT = 95 * 1000 * 1000; // 100MB
-const MIN_PART_SIZE    = 5 * 1_024 * 1_024;        // 5 MiB – R2 최소 크기
 
 /**
  * @param {string} key
@@ -61,56 +60,43 @@ const MIN_PART_SIZE    = 5 * 1_024 * 1_024;        // 5 MiB – R2 최소 크기
  * @param {Record<string, any>} options
  */
 export async function multipartUpload(key, file, options) {
-  const headers = { ...(options?.headers || {}) };
-  headers["content-type"] = file.type || "application/octet-stream";
+  const headers = options?.headers || {};
+  headers["content-type"] = file.type;
 
-  // 1) 업로드 세션 생성
   const uploadId = await axios
     .post(`/api/write/items/${key}?uploads`, "", { headers })
     .then((res) => res.data.uploadId);
+  const totalChunks = Math.ceil(file.size / SIZE_LIMIT);
 
-  // 2) 파트 사이즈 계산 (마지막 파트 ≥ 5 MiB 보장)
-  let partSize = SIZE_LIMIT;
-  const partsNeeded = Math.ceil(file.size / partSize);
-  if (file.size % partSize && file.size % partSize < MIN_PART_SIZE) {
-    // 마지막 파트가 너무 작으면 파트 크기를 줄여 재계산
-    partSize = Math.ceil(file.size / (partsNeeded - 1));
-  }
+  const promiseGenerator = function* () {
+    for (let i = 1; i <= totalChunks; i++) {
+      const chunk = file.slice((i - 1) * SIZE_LIMIT, i * SIZE_LIMIT);
+      const searchParams = new URLSearchParams({ partNumber: i, uploadId });
+      yield axios
+        .put(`/api/write/items/${key}?${searchParams}`, chunk, {
+          headers,
+          onUploadProgress(progressEvent) {
+            if (typeof options?.onUploadProgress !== "function") return;
+            options.onUploadProgress({
+              loaded: (i - 1) * SIZE_LIMIT + progressEvent.loaded,
+              total: file.size,
+            });
+          },
+        })
+        .then((res) => ({
+          PartNumber: i,
+          ETag:       res.headers.etag,
+        }));
+    }
+  };
 
-  // 3) 각 파트 전송
   const uploadedParts = [];
-  for (let partNumber = 1, offset = 0; offset < file.size; partNumber++) {
-    const chunk = file.slice(offset, offset + partSize);
-    offset += chunk.size;
-
-    const qs = new URLSearchParams({
-      partNumber: partNumber.toString(),
-      uploadId,                     // URLSearchParams 가 안전하게 인코딩
-    });
-
-    const { headers: resHeaders } = await axios.put(
-      `/api/write/items/${key}?${qs}`,
-      chunk,
-      {
-        headers,
-        onUploadProgress: (e) => {
-          options?.onUploadProgress?.({
-            loaded: offset - chunk.size + e.loaded,
-            total:  file.size,
-          });
-        },
-      },
-    );
-
-    uploadedParts.push({
-      PartNumber: partNumber,
-      ETag:       resHeaders.etag.replace(/"/g, ""), // 따옴표 제거
-    });
+  for (const part of promiseGenerator()) {
+    const { PartNumber, ETag } = await part;
+    uploadedParts[PartNumber - 1] = { PartNumber, ETag };
   }
-
-  // 4) 업로드 완료
-  const finishQs = new URLSearchParams({ uploadId });
-  await axios.post(`/api/write/items/${key}?${finishQs}`, {
+  const completeParams = new URLSearchParams({ uploadId });
+  await axios.post(`/api/write/items/${key}?${completeParams}`, {
     parts: uploadedParts,
   });
 }
