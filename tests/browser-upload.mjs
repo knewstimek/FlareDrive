@@ -8,7 +8,8 @@ if (!config.bucketName.startsWith("upload-check-") ||
     config.baseUrl !== "https://" + config.projectName + ".pages.dev") {
   throw new Error("An isolated test destination is required.");
 }
-const resultPath = config.artifactPath + "/browser.json";
+const cancelRun = process.env.TEST_CANCEL === "1";
+const resultPath = config.artifactPath + (cancelRun ? "/browser-cancel.json" : "/browser.json");
 const result = { state: "starting", parts: [], runtime_errors: [], failed_resources: [], auth_challenges: [] };
 const launchedAt = Date.now();
 const save = () => fs.writeFile(resultPath, JSON.stringify(result, null, 2));
@@ -154,11 +155,20 @@ try {
       const observer = new MutationObserver(() => {
         const status = document.querySelector(".upload-status")?.textContent.trim() || "";
         const error = document.querySelector(".upload-error")?.textContent.trim() || "";
-        if (status === "Uploads complete." || status === "Uploads finished with errors.") {
-          observer.disconnect(); resolve({ status, error });
+        if (status === "업로드가 모두 완료되었습니다." || status === "업로드 종료 · 실패한 파일을 확인해 주세요." || status.includes("취소한 파일")) {
+          observer.disconnect(); clearInterval(sampleTimer); resolve({ status, error, samples, badge: document.querySelector(".upload-badge")?.textContent.trim() });
         }
       });
       observer.observe(document.body, { childList: true, characterData: true, subtree: true });
+      const samples = [];
+      const sampleTimer = setInterval(() => {
+        const details = document.querySelector(".upload-job-details")?.textContent.trim() || "";
+        samples.push(details);
+        if (${cancelRun} && document.querySelector(".upload-badge")?.textContent.trim() === "전송 중") {
+          const button = [...document.querySelectorAll(".upload-job-actions button")].find(b => b.textContent.trim() === "취소");
+          if (button) { button.click(); clearInterval(sampleTimer); }
+        }
+      }, 500);
       const data = new DataTransfer();
       data.items.add(document.querySelector("#upload-test-file").files[0]);
       document.querySelector(".main").dispatchEvent(new DragEvent("drop", {
@@ -170,9 +180,9 @@ try {
   }, 190000);
   result.elapsed_s = Number(((performance.now() - started) / 1000).toFixed(3));
   result.ui = outcome.result.value;
-  result.state = result.ui.status === "Uploads complete." && !result.ui.error ? "completed" : "failed";
+  result.state = (cancelRun ? result.ui.badge === "취소됨" : result.ui.status === "업로드가 모두 완료되었습니다.") && !result.ui.error ? "completed" : "failed";
   const screenshot = await call("Page.captureScreenshot", { format: "png" });
-  await fs.writeFile(config.artifactPath + "/browser-upload.png", Buffer.from(screenshot.data, "base64"));
+  await fs.writeFile(config.artifactPath + (cancelRun ? "/browser-cancel.png" : "/browser-upload.png"), Buffer.from(screenshot.data, "base64"));
 } catch (error) {
   result.state = "failed";
   result.error = error.message.replaceAll(config.baseUrl, "[test origin]");

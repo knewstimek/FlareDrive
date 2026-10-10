@@ -183,7 +183,7 @@ async function appContext(axios = {}) {
     .replace("export default", "globalThis.component =");
   const context = {
     URL, window: { location: "https://test.invalid/?p=temp/" },
-    performance, setTimeout, axios, console,
+    performance, setTimeout, setInterval, clearInterval, AbortController, axios, console,
     fetch: async () => ({ redirected: false }),
     Dialog: {}, Menu: {}, MimeIcon: {}, UploadPopup: {},
     multipartUpload, generateThumbnail: () => {}, blobDigest: () => {},
@@ -223,4 +223,81 @@ test("small-file login HTML leaves a visible upload failure", async () => {
   assert.match(app.uploadErrors[0], /Storage did not confirm/);
   assert.equal(app.uploadStatus, "Uploads finished with errors.");
   assert.equal(app.uploading, false);
+});
+
+test("cancel aborts every active part, stops scheduling, and cleans only its multipart session", async () => {
+  const controller = new AbortController();
+  let puts = 0, completes = 0, deleted;
+  globalThis.axios = {
+    async post(url) {
+      if (url.endsWith("?uploads")) return { data: { uploadId: "cancel-session" } };
+      completes++; return completeResponse();
+    },
+    put(url, chunk, config) {
+      puts++;
+      return new Promise((resolve, reject) => config.signal.addEventListener("abort", () =>
+        reject(Object.assign(new Error("canceled"), { code: "ERR_CANCELED" })), { once: true }));
+    },
+    async delete(url, config) { deleted = url; assert.equal(config.signal, undefined); },
+  };
+  const running = multipartUpload("temp/existing.dpk", fileOf(SIZE_LIMIT * 5), { signal: controller.signal });
+  await tick(); assert.equal(puts, 3);
+  controller.abort();
+  await assert.rejects(running, e => e.code === "ERR_CANCELED");
+  assert.equal(puts, 3); assert.equal(completes, 0);
+  assert.equal(deleted, "/api/write/items/temp/existing.dpk?uploadId=cancel-session");
+});
+
+test("cancel during initialization cleans the created session without starting a part", async () => {
+  const controller = new AbortController(), init = deferred();
+  let puts = 0, cleaned = 0;
+  globalThis.axios = { post: () => init.promise, put: () => { puts++; }, delete: async () => { cleaned++; } };
+  const running = multipartUpload("temp/sample.dpk", fileOf(SIZE_LIMIT), { signal: controller.signal });
+  controller.abort(); init.resolve({ data: { uploadId: "session" } });
+  await assert.rejects(running, e => e.code === "ERR_CANCELED");
+  assert.equal(puts, 0); assert.equal(cleaned, 1);
+});
+
+test("completion cannot be interrupted or followed by deleting an existing object", async () => {
+  const controller = new AbortController(), completion = deferred();
+  let cleaned = 0;
+  globalThis.axios = {
+    post: (url) => url.endsWith("?uploads") ? Promise.resolve({ data: { uploadId: "session" } }) : completion.promise,
+    put: async () => partResponse(1), delete: async () => { cleaned++; },
+  };
+  const running = multipartUpload("temp/sample.dpk", fileOf(SIZE_LIMIT), { signal: controller.signal });
+  await tick(); controller.abort(); completion.resolve(completeResponse());
+  await running; assert.equal(cleaned, 0);
+});
+
+test("canceling queued files removes them without network traffic, and retry queues the same file once", async () => {
+  const app = await appContext();
+  app.uploading = true;
+  app.uploadFiles([{ name: "first" }, { name: "second" }]);
+  app.cancelUpload(app.uploadJobs[0]);
+  assert.equal(app.uploadQueue.length, 1);
+  assert.equal(app.uploadJobs[0].status, "canceled");
+  app.retryUpload(app.uploadJobs[0]); app.retryUpload(app.uploadJobs[0]);
+  assert.equal(app.uploadQueue.length, 2);
+  app.cancelAllUploads(); assert.equal(app.uploadQueue.length, 0);
+});
+
+test("session abort DELETE never calls object deletion, and blank session IDs fail closed", async () => {
+  const source = await readFile(new URL("../functions/api/write/items/[[path]].ts", import.meta.url), "utf8");
+  const code = source.slice(source.indexOf("export async function onRequestDelete")).replace("export ", "");
+  let objectsDeleted = 0, sessionsAborted = 0;
+  const bucket = { delete: async () => { objectsDeleted++; },
+    resumeMultipartUpload: (key, id) => {
+      assert.equal(key, "existing.dpk"); assert.equal(id, "session");
+      return { abort: async () => { sessionsAborted++; } };
+    } };
+  const ctx = { URL, Response, parseBucketPath: () => [bucket, "existing.dpk"], notFound: () => new Response(null, { status: 404 }) };
+  vm.runInNewContext(code, ctx);
+  const request = url => ({ request: new Request(url) });
+  assert.equal((await ctx.onRequestDelete(request("https://test.invalid/?uploadId=session"))).status, 204);
+  assert.equal(sessionsAborted, 1); assert.equal(objectsDeleted, 0);
+  assert.equal((await ctx.onRequestDelete(request("https://test.invalid/?uploadId="))).status, 400);
+  assert.equal(objectsDeleted, 0);
+  assert.equal((await ctx.onRequestDelete(request("https://test.invalid/"))).status, 204);
+  assert.equal(objectsDeleted, 1);
 });

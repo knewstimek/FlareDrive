@@ -1,16 +1,30 @@
 <template>
   <div class="main" @dragenter.prevent @dragover.prevent @drop.prevent="onDrop">
-    <progress
-      v-if="uploadProgress !== null"
-      :value="uploadProgress"
-      max="100"
-    ></progress>
-    <div v-if="uploadStatus" class="upload-status" role="status" aria-live="polite">
-      {{ uploadStatus }}
-    </div>
-    <div v-if="uploadErrors.length" class="upload-error" role="alert">
-      {{ uploadErrors.join(" · ") }}
-    </div>
+    <section v-if="uploadJobs.length" class="upload-panel" aria-label="업로드">
+      <header class="upload-panel-header">
+        <div><strong>업로드</strong><small>{{ uploadQueue.length }}개 대기 · {{ uploadJobs.filter(job => job.status === 'done').length }}개 완료</small></div>
+        <button v-if="uploading || uploadQueue.length" @click="cancelAllUploads">전체 취소</button>
+        <button v-else @click="clearUploads">목록 닫기</button>
+      </header>
+      <div class="upload-status" role="status" aria-live="polite">{{ uploadSummary() }}</div>
+      <article v-for="job in uploadJobs" :key="job.id" class="upload-job">
+        <div class="upload-job-heading">
+          <strong :title="job.file.name">{{ job.file.name }}</strong>
+          <span class="upload-badge" :data-state="job.status">{{ uploadLabel(job) }}</span>
+        </div>
+        <progress :value="job.percent" max="100" :aria-label="job.file.name + ' 업로드 진행률'"></progress>
+        <div class="upload-job-details">
+          <span>{{ Math.floor(job.percent) }}% · {{ formatSize(job.sent) }} / {{ formatSize(job.file.size) }}</span>
+          <span>전송속도 {{ formatSize(job.speed) }}/s</span>
+          <span>{{ remainingTime(job) }}</span>
+        </div>
+        <p v-if="job.error" class="upload-error" role="alert">{{ job.error }}</p>
+        <div class="upload-job-actions">
+          <button v-if="['queued', 'preparing', 'uploading', 'retrying', 'confirming'].includes(job.status)" @click="cancelUpload(job)">취소</button>
+          <button v-if="['failed', 'canceled'].includes(job.status)" @click="retryUpload(job)">다시 업로드</button>
+        </div>
+      </article>
+    </section>
     <UploadPopup
       v-model="showUploadPopup"
       @upload="onUploadClicked"
@@ -214,6 +228,8 @@ export default {
     uploading: false,
     uploadStatus: "",
     uploadErrors: [],
+    uploadJobs: [],
+    nextUploadId: 0,
   }),
 
   computed: {
@@ -290,8 +306,8 @@ export default {
     formatSize(size) {
       const units = ["B", "KB", "MB", "GB", "TB"];
       let i = 0;
-      while (size >= 1024) {
-        size /= 1024;
+      while (size >= 1000) {
+        size /= 1000;
         i++;
       }
       return `${size.toFixed(1)} ${units[i]}`;
@@ -339,6 +355,49 @@ export default {
       this.fetchFiles();
     },
 
+    uploadSummary() {
+      return { "Uploads complete.": "업로드가 모두 완료되었습니다.",
+        "Uploads finished with errors.": "업로드 종료 · 실패한 파일을 확인해 주세요." }[this.uploadStatus] || this.uploadStatus;
+    },
+
+    uploadLabel(job) {
+      if (job.status === "uploading" && job.waiting) return "파트 저장 확인 중";
+      return { queued: "대기", preparing: "준비 중", uploading: "전송 중", retrying: "재시도 중",
+        confirming: "저장 확인 중", completing: "최종 저장 중", done: "완료",
+        failed: "실패", canceled: "취소됨" }[job.status] || job.status;
+    },
+
+    remainingTime(job) {
+      if (job.status === "done") return "저장 완료";
+      if (["confirming", "completing"].includes(job.status)) return "서버 확인 대기";
+      if (job.waiting && job.status === "uploading") return "서버 응답 대기";
+      if (!job.speed || job.status !== "uploading") return "남은 시간 —";
+      const seconds = Math.ceil(Math.max(0, job.file.size - job.sent) / job.speed);
+      return seconds >= 60 ? `약 ${Math.ceil(seconds / 60)}분 남음` : `약 ${seconds}초 남음`;
+    },
+
+    cancelUpload(job) {
+      if (["done", "failed", "canceled", "completing"].includes(job.status)) return;
+      job.controller?.abort();
+      job.status = "canceled";
+      this.uploadQueue = this.uploadQueue.filter(task => task.id !== job.id);
+    },
+
+    cancelAllUploads() {
+      this.uploadJobs.forEach(job => this.cancelUpload(job));
+    },
+
+    retryUpload(job) {
+      if (!["failed", "canceled"].includes(job.status) || job.running) return;
+      job.status = "queued"; job.error = ""; job.percent = 0; job.sent = 0; job.speed = 0;
+      this.uploadQueue.push(job);
+      this.processUploadQueue();
+    },
+
+    clearUploads() {
+      if (!this.uploading) { this.uploadJobs = []; this.uploadStatus = ""; this.uploadErrors = []; }
+    },
+
     async processUploadQueue() {
       if (this.uploading || !this.uploadQueue.length) return;
       this.uploading = true;
@@ -346,18 +405,28 @@ export default {
       try {
         while (this.uploadQueue.length) {
           const task = this.uploadQueue.shift();
+          if (task.status === "canceled") continue;
+          task.running = true;
           try {
             await this.uploadFile(task);
+            task.status = "done";
           } catch (error) {
-            this.uploadErrors.push(`Upload failed: ${task.file.name}. ${error.message}`);
-            fetch("/api/write/")
-              .then((value) => {
-                if (value.redirected) window.location.href = value.url;
-              })
-              .catch(() => {});
-          }
+            if (task.controller?.signal.aborted || error.code === "ERR_CANCELED") {
+              task.status = "canceled";
+              task.error = error.cleanupFailed ? "전송은 중단했습니다. 임시 업로드 정리를 확인하지 못했습니다." : "";
+            } else {
+              task.status = "failed";
+              const status = error.response?.status;
+              task.error = status === 401 || status === 403 ? "업로드 권한 또는 로그인을 확인해 주세요." :
+                status === 413 ? "요청 크기 제한으로 실패했습니다." :
+                error.code === "ECONNABORTED" ? "응답 시간이 초과되었습니다. 연결을 확인하고 다시 시도하세요." :
+                `업로드 실패: ${error.message}`;
+              this.uploadErrors.push(task.error);
+            }
+          } finally { task.running = false; task.controller = null; if (["failed", "canceled"].includes(task.status)) task.speed = 0; }
         }
-        this.uploadStatus = this.uploadErrors.length ? "Uploads finished with errors." : "Uploads complete.";
+        this.uploadStatus = this.uploadErrors.length ? "Uploads finished with errors." :
+          this.uploadJobs.some(job => job.status === "canceled") ? "업로드 종료 · 취소한 파일이 있습니다." : "Uploads complete.";
         this.fetchFiles();
       } finally {
         this.uploading = false;
@@ -365,78 +434,69 @@ export default {
       }
     },
 
-    async uploadFile({ basedir, file }) {
+    async uploadFile(job) {
+      const { basedir, file } = job;
+      const controller = new AbortController();
+      job.controller = controller;
+      job.status = "preparing";
       this.uploadProgress = 0;
-      this.uploadStatus = `Preparing ${file.name}…`;
-      /** @type File **/
-      let thumbnailDigest = null;
-
-      if (file.type.startsWith("image/") || file.type === "video/mp4") {
-        try {
-          const thumbnailBlob = await generateThumbnail(file);
-          const digestHex = await blobDigest(thumbnailBlob);
-
-          const thumbnailUploadUrl = `/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`;
+      this.uploadStatus = `준비 중: ${file.name}`;
+      const started = performance.now();
+      let lastByteAt = started;
+      let previousTime = started, previousSent = 0;
+      const updateStatus = () => {
+        const now = performance.now();
+        job.waiting = now - lastByteAt >= 2000;
+        const dt = (now - previousTime) / 1000;
+        if (dt >= 0.5) {
+          const rate = Math.max(0, job.sent - previousSent) / dt;
+          job.speed = job.speed ? job.speed * 0.5 + rate * 0.5 : rate;
+          previousTime = now; previousSent = job.sent;
+        }
+        this.uploadStatus = `${this.uploadLabel(job)}: ${file.name}`;
+      };
+      const timer = setInterval(updateStatus, 1000);
+      try {
+        let thumbnailDigest = null;
+        if (file.type.startsWith("image/") || file.type === "video/mp4") {
           try {
-            await axios.put(thumbnailUploadUrl, thumbnailBlob);
+            const thumbnailBlob = await generateThumbnail(file);
+            if (controller.signal.aborted) throw Object.assign(new Error("Upload canceled."), { code: "ERR_CANCELED" });
+            const digestHex = await blobDigest(thumbnailBlob);
+            await axios.put(`/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`, thumbnailBlob,
+              { signal: controller.signal, timeout: 30000 });
             thumbnailDigest = digestHex;
           } catch (error) {
-            fetch("/api/write/")
-              .then((value) => {
-                if (value.redirected) window.location.href = value.url;
-              })
-              .catch(() => {});
-            console.log(`Upload ${digestHex}.png failed`);
+            if (controller.signal.aborted) throw error;
           }
-        } catch (error) {
-          console.log(`Generate thumbnail failed`);
         }
-      }
-
-      const uploadUrl = "/api/write/items/" +
-        (basedir + file.name).split("/").map(encodeURIComponent).join("/");
-      const headers = {};
-      const started = performance.now();
-      let sent = 0;
-      let stage = "uploading";
-      const updateStatus = () => {
-        const elapsed = Math.max((performance.now() - started) / 1000, 0.001);
-        const speed = this.formatSize(sent / elapsed) + "/s";
-        const label = {
-          uploading: "Uploading",
-          retrying: "Retrying",
-          confirming: "Waiting for storage",
-          completing: "Finalizing",
-        }[stage] || "Uploading";
-        this.uploadStatus = `${label}: ${file.name} · ${this.formatSize(sent)} / ${this.formatSize(file.size)} · ${speed}`;
-      };
-      const onUploadProgress = (event) => {
-        sent = event.loaded;
-        this.uploadProgress = Math.min(99, (sent * 100) / event.total);
-        updateStatus();
-      };
-      if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
-      if (file.size >= SIZE_LIMIT) {
-        await multipartUpload(basedir + file.name, file, {
-          headers,
-          onUploadProgress,
-          onUploadState: (state) => {
-            stage = state;
-            updateStatus();
-          },
-        });
-      } else {
-        const response = await axios.put(uploadUrl, file, {
-          headers,
-          timeout: 300000,
-          onUploadProgress,
-        });
-        if (response.data?.size !== file.size) {
-          throw new Error("Storage did not confirm the uploaded file.");
+        if (controller.signal.aborted) throw Object.assign(new Error("Upload canceled."), { code: "ERR_CANCELED" });
+        const uploadUrl = "/api/write/items/" + (basedir + file.name).split("/").map(encodeURIComponent).join("/");
+        const headers = {};
+        if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
+        const onUploadProgress = event => {
+          if (event.loaded !== job.sent) lastByteAt = performance.now();
+          job.sent = event.loaded;
+          job.percent = Math.min(99, event.loaded * 100 / (event.total || file.size || 1));
+          this.uploadProgress = job.percent;
+          if (event.loaded === file.size && job.status === "uploading") job.status = "confirming";
+          updateStatus();
+        };
+        job.status = "uploading";
+        if (file.size >= SIZE_LIMIT) {
+          await multipartUpload(basedir + file.name, file, {
+            headers, signal: controller.signal, onUploadProgress,
+            onUploadState: state => { if (job.status !== "canceled") job.status = state === "completed" ? "done" : state; updateStatus(); },
+          });
+        } else {
+          const response = await axios.put(uploadUrl, file, {
+            headers, signal: controller.signal, timeout: 300000, onUploadProgress,
+          });
+          if (response.data?.size !== file.size) throw new Error("Storage did not confirm the uploaded file.");
         }
-      }
-      this.uploadProgress = 100;
-      this.uploadStatus = `Upload complete: ${file.name}`;
+        job.percent = 100; job.sent = file.size; job.status = "done";
+        this.uploadProgress = 100;
+      } finally { clearInterval(timer); }
     },
 
     async removeFile(key) {
@@ -458,8 +518,10 @@ export default {
 
       const uploadTasks = Array.from(files).map((file) => ({
         basedir: this.cwd,
-        file,
+        file, id: ++this.nextUploadId, status: "queued", percent: 0, sent: 0,
+        speed: 0, error: "", controller: null, running: false, waiting: false,
       }));
+      this.uploadJobs.push(...uploadTasks);
       this.uploadQueue.push(...uploadTasks);
       if (!this.uploading) setTimeout(() => this.processUploadQueue());
     },
@@ -506,11 +568,24 @@ export default {
   height: 100%;
 }
 
-.upload-status, .upload-error {
-  padding: 8px;
-  overflow-wrap: anywhere;
-}
-.upload-error { color: #a40000; }
+.upload-panel { margin: 12px; padding: 16px; border: 1px solid #dce3ef; border-radius: 14px; background: #f8faff; box-shadow: 0 4px 16px #172d4d0a; }
+.upload-panel-header, .upload-job-heading, .upload-job-details, .upload-job-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.upload-panel-header small { display: block; margin-top: 5px; color: #65748b; }
+.upload-panel button { border: 1px solid #c9d5e7; background: white; border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+.upload-panel button:hover { background: #eaf0fb; }
+.upload-panel button:focus-visible { outline: 3px solid #5c8fe6; outline-offset: 2px; }
+.upload-status { padding: 10px 0; color: #435574; overflow-wrap: anywhere; }
+.upload-job { background: white; padding: 14px; border-radius: 10px; margin-top: 8px; }
+.upload-job-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.upload-badge { flex-shrink: 0; font-size: 12px; border-radius: 20px; padding: 4px 9px; background: #e8efff; color: #2859aa; }
+.upload-badge[data-state="failed"] { background: #ffe7e7; color: #a40000; }
+.upload-badge[data-state="done"] { background: #def4e7; color: #166438; }
+.upload-badge[data-state="canceled"] { background: #eef0f3; color: #596373; }
+.upload-job progress { display: block; position: static; width: 100%; height: 8px; margin: 12px 0; accent-color: #3978df; }
+.upload-job-details { color: #586983; font-size: 12px; flex-wrap: wrap; }
+.upload-job-actions { justify-content: flex-end; margin-top: 8px; }
+.upload-error { margin: 10px 0 0; overflow-wrap: anywhere; color: #a40000; }
+@media (max-width: 600px) { .upload-panel { margin: 8px; padding: 10px; } .upload-job-details { gap: 6px; } }
 
 .app-bar {
   position: sticky;

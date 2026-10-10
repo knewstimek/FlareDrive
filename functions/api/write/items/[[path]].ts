@@ -129,6 +129,17 @@ export async function onRequestDelete(context) {
   const [bucket, path] = parseBucketPath(context);
   if (!bucket) return notFound();
 
-  await bucket.delete(path);
+  const params = new URL(context.request.url).searchParams;
+  if (params.has("uploadId")) {
+    const uploadId = params.get("uploadId");
+    if (!uploadId) return new Response("Missing uploadId", { status: 400 });
+    try {
+      await bucket.resumeMultipartUpload(path, uploadId).abort();
+    } catch {
+      return new Response("Multipart cleanup failed", { status: 502 });
+    }
+  } else {
+    await bucket.delete(path);
+  }
   return new Response(null, { status: 204 });
 }
