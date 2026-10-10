@@ -5,6 +5,12 @@
       :value="uploadProgress"
       max="100"
     ></progress>
+    <div v-if="uploadStatus" class="upload-status" role="status" aria-live="polite">
+      {{ uploadStatus }}
+    </div>
+    <div v-if="uploadErrors.length" class="upload-error" role="alert">
+      {{ uploadErrors.join(" · ") }}
+    </div>
     <UploadPopup
       v-model="showUploadPopup"
       @upload="onUploadClicked"
@@ -205,6 +211,9 @@ export default {
     showUploadPopup: false,
     uploadProgress: null,
     uploadQueue: [],
+    uploading: false,
+    uploadStatus: "",
+    uploadErrors: [],
   }),
 
   computed: {
@@ -331,14 +340,35 @@ export default {
     },
 
     async processUploadQueue() {
-      if (!this.uploadQueue.length) {
+      if (this.uploading || !this.uploadQueue.length) return;
+      this.uploading = true;
+      this.uploadErrors = [];
+      try {
+        while (this.uploadQueue.length) {
+          const task = this.uploadQueue.shift();
+          try {
+            await this.uploadFile(task);
+          } catch (error) {
+            this.uploadErrors.push(`Upload failed: ${task.file.name}. ${error.message}`);
+            fetch("/api/write/")
+              .then((value) => {
+                if (value.redirected) window.location.href = value.url;
+              })
+              .catch(() => {});
+          }
+        }
+        this.uploadStatus = this.uploadErrors.length ? "Uploads finished with errors." : "Uploads complete.";
         this.fetchFiles();
+      } finally {
+        this.uploading = false;
         this.uploadProgress = null;
-        return;
       }
+    },
 
+    async uploadFile({ basedir, file }) {
+      this.uploadProgress = 0;
+      this.uploadStatus = `Preparing ${file.name}…`;
       /** @type File **/
-      const { basedir, file } = this.uploadQueue.pop(0);
       let thumbnailDigest = null;
 
       if (file.type.startsWith("image/") || file.type === "video/mp4") {
@@ -363,32 +393,50 @@ export default {
         }
       }
 
-      try {
-        const uploadUrl = `/api/write/items/${basedir}${file.name}`;
-        const headers = {};
-        const onUploadProgress = (progressEvent) => {
-          var percentCompleted =
-            (progressEvent.loaded * 100) / progressEvent.total;
-          this.uploadProgress = percentCompleted;
-        };
-        if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
-        if (file.size >= SIZE_LIMIT) {
-          await multipartUpload(`${basedir}${file.name}`, file, {
-            headers,
-            onUploadProgress,
-          });
-        } else {
-          await axios.put(uploadUrl, file, { headers, onUploadProgress });
+      const uploadUrl = "/api/write/items/" +
+        (basedir + file.name).split("/").map(encodeURIComponent).join("/");
+      const headers = {};
+      const started = performance.now();
+      let sent = 0;
+      let stage = "uploading";
+      const updateStatus = () => {
+        const elapsed = Math.max((performance.now() - started) / 1000, 0.001);
+        const speed = this.formatSize(sent / elapsed) + "/s";
+        const label = {
+          uploading: "Uploading",
+          retrying: "Retrying",
+          confirming: "Waiting for storage",
+          completing: "Finalizing",
+        }[stage] || "Uploading";
+        this.uploadStatus = `${label}: ${file.name} · ${this.formatSize(sent)} / ${this.formatSize(file.size)} · ${speed}`;
+      };
+      const onUploadProgress = (event) => {
+        sent = event.loaded;
+        this.uploadProgress = Math.min(99, (sent * 100) / event.total);
+        updateStatus();
+      };
+      if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
+      if (file.size >= SIZE_LIMIT) {
+        await multipartUpload(basedir + file.name, file, {
+          headers,
+          onUploadProgress,
+          onUploadState: (state) => {
+            stage = state;
+            updateStatus();
+          },
+        });
+      } else {
+        const response = await axios.put(uploadUrl, file, {
+          headers,
+          timeout: 300000,
+          onUploadProgress,
+        });
+        if (response.data?.size !== file.size) {
+          throw new Error("Storage did not confirm the uploaded file.");
         }
-      } catch (error) {
-        fetch("/api/write/")
-          .then((value) => {
-            if (value.redirected) window.location.href = value.url;
-          })
-          .catch(() => {});
-        console.log(`Upload ${file.name} failed`, error);
       }
-      setTimeout(this.processUploadQueue);
+      this.uploadProgress = 100;
+      this.uploadStatus = `Upload complete: ${file.name}`;
     },
 
     async removeFile(key) {
@@ -413,7 +461,7 @@ export default {
         file,
       }));
       this.uploadQueue.push(...uploadTasks);
-      setTimeout(() => this.processUploadQueue());
+      if (!this.uploading) setTimeout(() => this.processUploadQueue());
     },
   },
 
@@ -457,6 +505,12 @@ export default {
 .main {
   height: 100%;
 }
+
+.upload-status, .upload-error {
+  padding: 8px;
+  overflow-wrap: anywhere;
+}
+.upload-error { color: #a40000; }
 
 .app-bar {
   position: sticky;
