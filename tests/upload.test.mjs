@@ -369,3 +369,34 @@ test("login gateway returns no-store probe response and returns navigation to th
   assert.equal(navigation.status, 302);
   assert.equal(navigation.headers.get("location"), "https://test.invalid/?p=temp%2F");
 });
+test("authenticated login button checks status without refreshing or navigating", async () => {
+  let navigations = 0;
+  const app = await appContext({}, {
+    window: { location: { href: "https://test.invalid/", assign: () => { navigations++; } } },
+    fetch: async () => ({ status: 204 }),
+  });
+  await app.signIn();
+  assert.equal(app.writeAuthState, "authenticated");
+  assert.equal(navigations, 0);
+  assert.equal(app.writeAuthBusy, false);
+});
+
+test("initial authentication status check never redirects anonymous visitors", async () => {
+  const app = await appContext({}, {
+    window: { location: { href: "https://test.invalid/", assign: () => assert.fail("initial redirect") } },
+    fetch: async () => ({ status: 0, type: "opaqueredirect" }),
+  });
+  await app.refreshWriteAccess();
+  assert.equal(app.writeAuthState, "required");
+});
+
+test("login button handles network failure and allows another attempt", async () => {
+  const app = await appContext({}, {
+    window: { location: { href: "https://test.invalid/", assign: () => assert.fail("unexpected login") } },
+    fetch: async () => { throw new Error("Offline"); },
+  });
+  await app.signIn();
+  assert.equal(app.writeAuthState, "unknown");
+  assert.equal(app.writeAuthBusy, false);
+  assert.match(app.writeError, /인증/);
+});

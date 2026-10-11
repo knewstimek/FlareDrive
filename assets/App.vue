@@ -1,8 +1,15 @@
 <template>
   <div class="main" @dragenter.prevent @dragover.prevent @drop.prevent="onDrop">
     <div class="management-auth">
-      <a :href="writeLoginUrl()">관리자 로그인</a>
-      <span v-if="writeError" role="alert">{{ writeError }}</span>
+      <div class="management-auth-status" role="status" aria-live="polite">
+        <span class="management-auth-dot" :data-state="writeAuthState"></span>
+        <strong>{{ managementAuthLabel }}</strong>
+        <small>{{ writeAuthState === 'authenticated' ? '업로드와 삭제를 사용할 수 있어요.' : '파일 관리는 관리자 인증이 필요해요.' }}</small>
+      </div>
+      <button class="management-auth-button" @click="signIn" :disabled="writeAuthBusy || writeAuthState === 'checking'">
+        {{ writeAuthBusy ? '확인 중…' : writeAuthState === 'authenticated' ? '인증 상태 확인' : '관리자 로그인' }}
+      </button>
+      <span v-if="writeError" class="management-auth-error" role="alert">{{ writeError }}</span>
     </div>
     <section v-if="uploadJobs.length" class="upload-panel" aria-label="업로드">
       <header class="upload-panel-header">
@@ -235,9 +242,20 @@ export default {
     uploadJobs: [],
     nextUploadId: 0,
     writeError: "",
+    writeAuthState: "checking",
+    writeAuthBusy: false,
   }),
 
   computed: {
+    managementAuthLabel() {
+      return {
+        checking: "인증 확인 중…",
+        authenticated: "관리자 로그인됨",
+        required: "로그인 필요",
+        unknown: "인증 상태 확인 필요",
+      }[this.writeAuthState];
+    },
+
     filteredFiles() {
       let files = this.files;
       if (this.search) {
@@ -264,18 +282,50 @@ export default {
       return url.pathname + url.search;
     },
 
-    async ensureWriteAccess() {
+    async probeWriteAccess() {
       const response = await fetch(this.writeLoginUrl(), {
         credentials: "same-origin", redirect: "manual", cache: "no-store",
         headers: { "X-Requested-With": "XMLHttpRequest" },
       });
-      if (response.status === 204) return true;
+      if (response.status === 204) {
+        this.writeAuthState = "authenticated";
+        return true;
+      }
       if (response.type === "opaqueredirect" || [401, 403].includes(response.status)) {
-        this.writeError = "관리자 로그인 후 작업을 다시 실행해 주세요.";
-        window.location.assign(this.writeLoginUrl());
+        this.writeAuthState = "required";
         return false;
       }
+      this.writeAuthState = "unknown";
       throw new Error("인증 상태를 확인하지 못했습니다.");
+    },
+
+    async refreshWriteAccess() {
+      try {
+        await this.probeWriteAccess();
+      } catch {
+        this.writeAuthState = "unknown";
+      }
+    },
+
+    async ensureWriteAccess() {
+      if (await this.probeWriteAccess()) return true;
+      this.writeError = "관리자 로그인 후 작업을 다시 실행해 주세요.";
+      window.location.assign(this.writeLoginUrl());
+      return false;
+    },
+
+    async signIn() {
+      if (this.writeAuthBusy) return;
+      this.writeAuthBusy = true;
+      this.writeError = "";
+      try {
+        await this.ensureWriteAccess();
+      } catch {
+        this.writeAuthState = "unknown";
+        this.writeError = "인증 상태를 확인하지 못했습니다. 다시 시도해 주세요.";
+      } finally {
+        this.writeAuthBusy = false;
+      }
     },
 
     copyLink(link) {
@@ -585,6 +635,7 @@ export default {
   },
 
   created() {
+    this.refreshWriteAccess();
     window.addEventListener("popstate", (ev) => {
       const searchParams = new URL(window.location).searchParams;
       if (searchParams.get("p") !== this.cwd)

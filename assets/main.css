@@ -5,12 +5,49 @@
 .management-auth {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
-  padding: 8px 16px;
+  margin: 12px 8px;
+  padding: 14px 16px;
+  border: 1px solid #dce5f2;
+  border-radius: 12px;
+  background: #f4f7fc;
+  color: #243852;
 }
 
-.management-auth [role="alert"] {
-  color: #b42318;
+.management-auth-status {
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  align-items: center;
+  gap: 5px 9px;
+}
+
+.management-auth-status strong { font-size: 14px; }
+.management-auth-status small { grid-column: 2; color: #5d6e83; font-size: 12px; }
+.management-auth-dot { width: 8px; height: 8px; border-radius: 50%; background: #8391a5; }
+.management-auth-dot[data-state="authenticated"] { background: #15945a; }
+.management-auth-dot[data-state="required"] { background: #d58a1f; }
+
+.management-auth .management-auth-button {
+  padding: 9px 14px;
+  border: 1px solid #2860ba;
+  border-radius: 8px;
+  background: #2860ba;
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.management-auth .management-auth-button:hover { background: #204e99; }
+.management-auth .management-auth-button:focus-visible { outline: 3px solid #92baff; outline-offset: 2px; }
+.management-auth .management-auth-button:disabled { opacity: 0.65; cursor: wait; }
+.management-auth-error { flex-basis: 100%; color: #b42318; font-size: 13px; }
+
+@media (max-width: 480px) {
+  .management-auth { padding: 12px; }
+  .management-auth .management-auth-button { width: 100%; }
 }
 
 html,
