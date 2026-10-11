@@ -1,5 +1,9 @@
 <template>
   <div class="main" @dragenter.prevent @dragover.prevent @drop.prevent="onDrop">
+    <div class="management-auth">
+      <a :href="writeLoginUrl()">관리자 로그인</a>
+      <span v-if="writeError" role="alert">{{ writeError }}</span>
+    </div>
     <section v-if="uploadJobs.length" class="upload-panel" aria-label="업로드">
       <header class="upload-panel-header">
         <div><strong>업로드</strong><small>{{ uploadQueue.length }}개 대기 · {{ uploadJobs.filter(job => job.status === 'done').length }}개 완료</small></div>
@@ -213,7 +217,7 @@ import UploadPopup from "./UploadPopup.vue";
 export default {
   data: () => ({
     clipboard: null,
-    cwd: new URL(window.location).searchParams.get("p") || "",
+    cwd: new URL(window.location.href || window.location).searchParams.get("p") || "",
     files: [],
     folders: [],
     focusedItem: null,
@@ -230,6 +234,7 @@ export default {
     uploadErrors: [],
     uploadJobs: [],
     nextUploadId: 0,
+    writeError: "",
   }),
 
   computed: {
@@ -253,6 +258,26 @@ export default {
   },
 
   methods: {
+    writeLoginUrl() {
+      const url = new URL("/api/write/login", window.location.href || window.location);
+      if (this.cwd) url.searchParams.set("p", this.cwd);
+      return url.pathname + url.search;
+    },
+
+    async ensureWriteAccess() {
+      const response = await fetch(this.writeLoginUrl(), {
+        credentials: "same-origin", redirect: "manual", cache: "no-store",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      if (response.status === 204) return true;
+      if (response.type === "opaqueredirect" || [401, 403].includes(response.status)) {
+        this.writeError = "관리자 로그인 후 작업을 다시 실행해 주세요.";
+        window.location.assign(this.writeLoginUrl());
+        return false;
+      }
+      throw new Error("인증 상태를 확인하지 못했습니다.");
+    },
+
     copyLink(link) {
       const url = new URL(link, window.location.origin);
       navigator.clipboard.writeText(url.toString());
@@ -501,8 +526,21 @@ export default {
 
     async removeFile(key) {
       if (!window.confirm(`Delete ${key} permanently?`)) return;
-      await axios.delete(`/api/write/items/${key}`);
-      this.fetchFiles();
+      this.writeError = "";
+      try {
+        if (!(await this.ensureWriteAccess())) return;
+        await axios.delete(`/api/write/items/${key}`, {
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        this.fetchFiles();
+      } catch (error) {
+        if ([401, 403].includes(error.response?.status)) {
+          this.writeError = "관리자 로그인 후 삭제를 다시 실행해 주세요.";
+          window.location.assign(this.writeLoginUrl());
+        } else {
+          this.writeError = "삭제하지 못했습니다. 연결 상태를 확인하고 다시 시도해 주세요.";
+        }
+      }
     },
 
     async renameFile(key) {

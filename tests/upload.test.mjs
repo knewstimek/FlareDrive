@@ -176,7 +176,7 @@ test("a completion response without the storage ETag does not count as success",
   await assert.rejects(multipartUpload("temp/sample.dpk", fileOf(SIZE_LIMIT)), /completion could not be confirmed/);
 });
 
-async function appContext(axios = {}) {
+async function appContext(axios = {}, browser = {}) {
   const source = await readFile(new URL("../assets/App.vue", import.meta.url), "utf8");
   const script = source.match(/<script>([\s\S]*?)<\/script>/)[1]
     .replace(/^import[\s\S]*?;\s*/gm, "")
@@ -187,7 +187,7 @@ async function appContext(axios = {}) {
     fetch: async () => ({ redirected: false }),
     Dialog: {}, Menu: {}, MimeIcon: {}, UploadPopup: {},
     multipartUpload, generateThumbnail: () => {}, blobDigest: () => {},
-    SIZE_LIMIT,
+    SIZE_LIMIT, ...browser,
   };
   vm.runInNewContext(script, context, { filename: "App.vue" });
   const app = context.component.data();
@@ -300,4 +300,72 @@ test("session abort DELETE never calls object deletion, and blank session IDs fa
   assert.equal(objectsDeleted, 0);
   assert.equal((await ctx.onRequestDelete(request("https://test.invalid/"))).status, 204);
   assert.equal(objectsDeleted, 1);
+});
+
+test("delete without Access authentication navigates to login without deleting", async () => {
+  let deletes = 0, destination;
+  const app = await appContext({ delete: async () => { deletes++; } }, {
+    window: { location: { href: "https://test.invalid/?p=temp%2F", assign: value => { destination = value; } }, confirm: () => true },
+    fetch: async (_url, options) => {
+      assert.equal(options.redirect, "manual");
+      assert.equal(options.credentials, "same-origin");
+      return { status: 0, type: "opaqueredirect" };
+    },
+  });
+  await app.removeFile("temp/sample.bin");
+  assert.equal(deletes, 0);
+  assert.equal(destination, "/api/write/login?p=temp%2F");
+});
+
+test("authenticated delete sends one request and refreshes the listing", async () => {
+  let deletes = 0, refreshed = 0;
+  const app = await appContext({ delete: async (url, options) => {
+    deletes++; assert.equal(url, "/api/write/items/temp/sample.bin");
+    assert.equal(options.headers["X-Requested-With"], "XMLHttpRequest");
+  } }, {
+    window: { location: { href: "https://test.invalid/?p=temp%2F", assign: () => assert.fail("unexpected login") }, confirm: () => true },
+    fetch: async () => ({ status: 204 }),
+  });
+  app.fetchFiles = () => { refreshed++; };
+  await app.removeFile("temp/sample.bin");
+  assert.equal(deletes, 1);
+  assert.equal(refreshed, 1);
+});
+
+test("session expiry during delete is handled without automatically replaying deletion", async () => {
+  let deletes = 0, destination;
+  const app = await appContext({ delete: async () => {
+    deletes++; throw { response: { status: 401 } };
+  } }, {
+    window: { location: { href: "https://test.invalid/?p=temp%2F", assign: value => { destination = value; } }, confirm: () => true },
+    fetch: async () => ({ status: 204 }),
+  });
+  await app.removeFile("temp/sample.bin");
+  assert.equal(deletes, 1);
+  assert.equal(destination, "/api/write/login?p=temp%2F");
+});
+
+test("failed authentication probe is handled without deleting or an unhandled rejection", async () => {
+  let deletes = 0;
+  const app = await appContext({ delete: async () => { deletes++; } }, {
+    window: { location: { href: "https://test.invalid/?p=temp%2F", assign: () => assert.fail("unexpected login") }, confirm: () => true },
+    fetch: async () => { throw new Error("Network error"); },
+  });
+  await app.removeFile("temp/sample.bin");
+  assert.equal(deletes, 0);
+  assert.match(app.writeError, /삭제하지 못했습니다/);
+});
+
+test("login gateway returns no-store probe response and returns navigation to the same-origin folder", async () => {
+  const source = await readFile(new URL("../functions/api/write/login.ts", import.meta.url), "utf8");
+  const context = { URL, Response };
+  vm.runInNewContext(source.replace("export async function", "async function"), context);
+  const probe = await context.onRequestGet({ request: new Request("https://test.invalid/api/write/login", {
+    headers: { "X-Requested-With": "XMLHttpRequest" },
+  }) });
+  assert.equal(probe.status, 204);
+  assert.equal(probe.headers.get("cache-control"), "no-store");
+  const navigation = await context.onRequestGet({ request: new Request("https://test.invalid/api/write/login?p=temp%2F&returnTo=https://other.invalid/") });
+  assert.equal(navigation.status, 302);
+  assert.equal(navigation.headers.get("location"), "https://test.invalid/?p=temp%2F");
 });
